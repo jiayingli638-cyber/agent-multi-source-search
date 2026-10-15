@@ -1,0 +1,7 @@
+{
+  "name": "TRAE Web3 NFT Edition - AI Native IDE",
+  "description": "基于 TRAE 界面重塑的沉浸式 NFT 风格 AI 原生协作 IDE 与智能对话工作台。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
