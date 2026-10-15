@@ -191,7 +191,7 @@ class MediaCrawlerAdapter(SourceAdapter):
         before = self._snapshot(home)
 
         argv = self._build_argv(home, query, limit)
-        log.info("[%s] 执行：%s", self.name, " ".join(argv))
+        log.info("[%s] 执行：%s", self.name, " ".join(self._sanitize_argv(argv)))
 
         # 直接用专用超时。原先是 max(source_timeout, mediacrawler_timeout)，
         # 会把通用超时放大，卡住时要等很久才放弃。
@@ -243,6 +243,20 @@ class MediaCrawlerAdapter(SourceAdapter):
         if self.venv_python.exists():
             return str(self.venv_python)
         return _resolve_executable(settings.mediacrawler_python)
+
+    def _sanitize_argv(self, argv: list[str]) -> list[str]:
+        """日志打印前隐藏 Cookie，避免把登录凭证写进终端/日志。"""
+        result: list[str] = []
+        hide_next = False
+        for item in argv:
+            if hide_next:
+                result.append("<cookie:hidden>")
+                hide_next = False
+                continue
+            result.append(item)
+            if item == "--cookies":
+                hide_next = True
+        return result
 
     def _build_argv(self, home: Path, query: str, limit: int) -> list[str]:
         """构造 MediaCrawler 命令行参数（已对齐 v0.1.0 的真实 CLI）。"""
