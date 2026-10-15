@@ -32,7 +32,8 @@ agent项目网络检索/
 │   │   ├── core/                # 配置、模型、HTTP 工具、日志
 │   │   └── main.py              # FastAPI 应用
 │   ├── tests/                   # 数据源自检 + 端到端测试
-│   ├── scripts/apply_cookies.py # MediaCrawler Cookie 配置助手
+│   ├── scripts/apply_cookies.py # Cookie 配置助手（交互 / 批量导入 / 状态查询）
+│   ├── cookies.txt.example      # Cookie 填写模板（真实 cookies.txt 已 gitignore）
 │   ├── requirements.txt
 │   └── .env.example
 └── frontend/                    # React 19 + Vite + Tailwind v4
@@ -268,14 +269,42 @@ MEDIACRAWLER_PLATFORMS=xhs,dy,ks,bili,wb,tieba,zhihu
 MEDIACRAWLER_TIMEOUT=180
 ```
 
-**Cookie 配置**（两种写法任选）：
+**Cookie 配置**（三种方式任选）：
+
+方式一 —— **批量导入（推荐，Cookie 过期后重刷也用它）**：
+```bash
+cd backend
+cp cookies.txt.example cookies.txt   # 首次：从模板创建
+# 编辑 cookies.txt，按平台填入 Cookie
+.venv/Scripts/python.exe scripts/apply_cookies.py --from-file cookies.txt
+```
+`cookies.txt` 格式宽松，键可用平台代码或中文名，分隔符 `=` 或 `:` 均可：
+```
+zhihu=SESSDATA=xxx; _zap=yyy
+bili: buvid3=aaa; SESSDATA=bbb
+小红书=web_session=ccc
+```
+重复运行会**原地覆盖**同名变量，不会产生重复行。
+
+方式二 —— **交互式逐个粘贴**：
+```bash
+cd backend && .venv/Scripts/python.exe scripts/apply_cookies.py
+```
+
+方式三 —— **直接编辑 `.env`**：
 ```
 # 统一变量，多平台用分号分隔
 MEDIACRAWLER_COOKIES=xhs=<cookie>;wb=<cookie>;bili=<cookie>
 # 或独立变量
 MEDIACRAWLER_COOKIE_XHS=<cookie>
 ```
-也可用交互式助手：`cd backend && python scripts/apply_cookies.py`
+
+随时查看各平台配置状态：
+```bash
+.venv/Scripts/python.exe scripts/apply_cookies.py --status
+```
+
+> ⚠️ `cookies.txt` 与 `.env` 均含登录凭证，已在 `.gitignore` 中排除（模板 `cookies.txt.example` 例外），切勿提交。
 
 > **CLI 参数已对齐 MediaCrawler v0.1.0**：平台代码取 `PlatformEnum` 值（`wb` 而非 `weibo`），
 > 关键词统一用 `--keywords`（多词逗号分隔），Cookie 用 `--cookies`，输出为

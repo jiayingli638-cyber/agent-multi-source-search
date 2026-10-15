@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+.env.bak*
+*.bak
 !.env.example
 *.pem
 *.key
@@ -60,6 +62,9 @@ pnpm-debug.log*
 .eslintcache
 
 # ============ 运行时数据与浏览器 profile（含登录 Cookie，切勿提交）============
+cookies.txt
+cookies*.txt
+!cookies.txt.example
 backend/.cache/
 .cache/
 **/xiaoheihe-profile/
