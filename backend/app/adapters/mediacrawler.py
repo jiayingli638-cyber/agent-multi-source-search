@@ -29,6 +29,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -192,7 +193,9 @@ class MediaCrawlerAdapter(SourceAdapter):
         argv = self._build_argv(home, query, limit)
         log.info("[%s] 执行：%s", self.name, " ".join(argv))
 
-        timeout = max(float(settings.source_timeout), float(settings.mediacrawler_timeout))
+        # 直接用专用超时。原先是 max(source_timeout, mediacrawler_timeout)，
+        # 会把通用超时放大，卡住时要等很久才放弃。
+        timeout = float(settings.mediacrawler_timeout)
         proc = await asyncio.create_subprocess_exec(
             python_exe,
             *argv,
@@ -204,8 +207,7 @@ class MediaCrawlerAdapter(SourceAdapter):
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await self._kill_tree(proc)
             raise RuntimeError(f"MediaCrawler[{self.platform}] 执行超时（>{timeout:.0f}s）") from None
 
         if proc.returncode != 0:
@@ -213,6 +215,28 @@ class MediaCrawlerAdapter(SourceAdapter):
             raise RuntimeError(f"MediaCrawler[{self.platform}] 退出码 {proc.returncode}：{tail}")
 
         return self._read_results(home, before, limit)
+
+    async def _kill_tree(self, proc: asyncio.subprocess.Process) -> None:
+        """终止子进程及其全部后代。
+
+        MediaCrawler 会拉起 Chromium，只 kill 父进程会留下孤儿浏览器进程
+        持续占用内存。Windows 下用 taskkill /T 连带子树一起清理。
+        """
+        try:
+            if sys.platform == "win32":
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            else:
+                proc.kill()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[%s] 清理子进程失败：%s", self.name, exc)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _pick_python(self, home: Path) -> str | None:
         """优先用 uv 虚拟环境里的解释器，其次用配置项。"""
