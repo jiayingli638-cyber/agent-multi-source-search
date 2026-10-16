@@ -26,6 +26,16 @@ class SourceAdapter(abc.ABC):
     requires_credentials: bool = False
     description: str = ""
 
+    # 是否允许路由 LLM 直接调度为检索源。
+    # web_fetch 这类「按 URL 抓正文」的工具语义不同（query 是 URL 而非检索词），
+    # 应置 False，避免被规划器误当成搜索引擎导致 0 命中。
+    selectable_by_llm: bool = True
+
+    # 该源单个请求的兜底超时（秒）。0 表示用 fan_out 的默认值
+    # max(source_timeout * 3, 45)。子进程类源（如 MediaCrawler）应覆盖为
+    # 「内层超时 + 缓冲」，否则会被外层更短的超时提前杀死。
+    search_timeout: float = 0.0
+
     # ---------- 子类需实现 ----------
     @abc.abstractmethod
     async def _search(self, query: str, limit: int) -> list[Doc]:

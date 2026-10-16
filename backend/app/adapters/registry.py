@@ -55,9 +55,15 @@ class AdapterRegistry:
         return [a.info() for a in self._adapters.values()]
 
     def catalog_for_llm(self) -> str:
-        """给路由 LLM 看的源清单（只列可用源，避免规划出无效任务）。"""
+        """给路由 LLM 看的源清单。
+
+        只列「可被调度」的源（selectable_by_llm=True），避免规划器选中
+        web_fetch 这类 query 语义不同的工具，产生 0 命中。
+        """
         lines = []
         for a in self._adapters.values():
+            if not a.selectable_by_llm:
+                continue
             status = "可用" if a.available() else f"不可用({a.unavailable_reason()[:40]})"
             lines.append(
                 f"- {a.name} | 展示名={a.platform or a.name} | 类别={a.kind.value} | "

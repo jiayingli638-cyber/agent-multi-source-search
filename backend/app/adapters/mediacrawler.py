@@ -92,6 +92,40 @@ def _resolve_executable(configured: str) -> str | None:
     return shutil.which(configured)
 
 
+# ---------- 评论归一化（跨平台字段兼容） ----------
+def _comment_ref(comment: dict) -> str:
+    """评论归属的内容主键（用于与 note 关联）。"""
+    return str(
+        comment.get("video_id") or comment.get("note_id") or comment.get("content_id")
+        or comment.get("aweme_id") or comment.get("aid") or ""
+    )
+
+
+def _comment_text(c: dict) -> str:
+    return str(
+        c.get("content") or c.get("comment_content") or c.get("text")
+        or c.get("content_text") or ""
+    ).strip()
+
+
+def _comment_author(c: dict) -> str:
+    return str(
+        c.get("nickname") or c.get("user_nickname") or c.get("user_name")
+        or c.get("uname") or c.get("author") or ""
+    ).strip()
+
+
+def _comment_likes(c: dict) -> int:
+    raw = (
+        c.get("like_count") or c.get("comment_like_count") or c.get("like_num")
+        or c.get("liked_count") or c.get("voteup_count") or 0
+    )
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 class MediaCrawlerAdapter(SourceAdapter):
     """单个社媒平台的适配器；由 build_mediacrawler_adapters() 按平台实例化。"""
 
@@ -103,6 +137,9 @@ class MediaCrawlerAdapter(SourceAdapter):
         self.name = f"mediacrawler_{self.platform_key}"
         self.platform = PLATFORM_LABELS.get(self.platform_key, self.platform_key)
         self.description = f"{self.platform}内容检索（经 MediaCrawler）"
+        # 外层（fan_out）超时须大于内层子进程超时，否则内层 90s 永远到不了
+        # 就被提前杀死。留 20s 缓冲给进程树清理。
+        self.search_timeout = settings.mediacrawler_timeout + 20
 
     @property
     def venv_python(self) -> Path:
@@ -268,8 +305,8 @@ class MediaCrawlerAdapter(SourceAdapter):
             "--keywords", query,          # 统一参数名，多关键词用逗号分隔
             "--save_data_option", "json",
             "--crawler_max_notes_count", str(max(1, limit)),
-            "--get_comment", "no",        # 检索场景不需要评论，显著提速
-            "--get_sub_comment", "no",
+            "--get_comment", "yes",       # 采集评论区高赞观点，供答案引用
+            "--get_sub_comment", "no",    # 子评论耗时且与主评论重复，暂不抓
             "--get_media", "no",
             "--headless", "yes",
         ]
@@ -304,19 +341,42 @@ class MediaCrawlerAdapter(SourceAdapter):
         }
 
     def _read_results(self, home: Path, before: dict[str, float], limit: int) -> list[Doc]:
-        """读取 MediaCrawler 输出的 JSON 结果，优先取本次新写入的文件。"""
+        """读取 MediaCrawler 输出的 JSON 结果，优先取本次新写入的文件。
+
+        评论单独落盘在 `search_comments_*.json`（与 `search_contents_*.json` 分开），
+        这里一并读取，按归属 id 关联到对应内容，取点赞最高的几条塞进 Doc。
+        """
         folder = self._json_dir(home)
         if not folder.exists():
             return []
 
         files = [f for f in folder.glob("*.json") if f.is_file()]
+        content_files = [f for f in files if "comment" not in f.stem.lower()]
+        comment_files = [f for f in files if "comment" in f.stem.lower()]
+
+        # 评论按「归属内容 id」建索引，便于挂到对应 note 上
+        comment_map: dict[str, list[dict]] = {}
+        for f in comment_files:
+            try:
+                payload = json.loads(f.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:  # noqa: BLE001
+                continue
+            items = payload if isinstance(payload, list) else payload.get("data", [])
+            if not isinstance(items, list):
+                continue
+            for c in items:
+                if not isinstance(c, dict):
+                    continue
+                ref = _comment_ref(c)
+                if ref:
+                    comment_map.setdefault(ref, []).append(c)
 
         def sort_key(p: Path) -> float:
             return p.stat().st_mtime
 
-        fresh = [f for f in files if before.get(str(f)) != f.stat().st_mtime]
+        fresh = [f for f in content_files if before.get(str(f)) != f.stat().st_mtime]
         # 本次没有新文件（如当天已有结果）则退回全量按时间倒序
-        pool = fresh or files
+        pool = fresh or content_files
         ordered = sorted(pool, key=sort_key, reverse=True)
 
         docs: list[Doc] = []
@@ -338,19 +398,49 @@ class MediaCrawlerAdapter(SourceAdapter):
                     continue
                 if key:
                     seen.add(key)
+                # 关联高赞评论
+                hot = self._top_comments(comment_map.get(self._note_key(item), []))
+                if hot:
+                    doc.extras["hot_comments"] = hot
                 docs.append(doc)
                 if len(docs) >= limit:
                     return docs
         return docs
 
+    def _note_key(self, item: dict) -> str:
+        """提取内容唯一主键（各平台字段不同，统一 fallback）。"""
+        return str(
+            item.get("note_id") or item.get("aweme_id") or item.get("video_id")
+            or item.get("aid") or item.get("id") or item.get("article_id")
+            or item.get("bvid") or item.get("mblogid") or item.get("tieba_id")
+            or item.get("content_id") or ""
+        )
+
+    def _top_comments(self, comments: list[dict], top_k: int = 3) -> list[dict]:
+        """从评论里挑点赞最高的 top_k 条，返回可展示结构。"""
+        if not comments:
+            return []
+        ranked = sorted(comments, key=_comment_likes, reverse=True)
+        out: list[dict] = []
+        for c in ranked:
+            text = _comment_text(c)
+            if not text:
+                continue
+            out.append(
+                {
+                    "author": _comment_author(c) or "匿名网友",
+                    "content": text[:200],
+                    "likes": _comment_likes(c),
+                }
+            )
+            if len(out) >= top_k:
+                break
+        return out
+
     # ---------- 归一化 ----------
     def _to_doc(self, item: dict, idx: int) -> Doc:
         """把 MediaCrawler 各平台字段统一映射为 Doc。"""
-        note_id = str(
-            item.get("note_id") or item.get("aweme_id") or item.get("video_id")
-            or item.get("aid") or item.get("id") or item.get("article_id")
-            or item.get("bvid") or item.get("mblogid") or item.get("tieba_id") or ""
-        )
+        note_id = self._note_key(item)
         title = (
             item.get("title") or item.get("note_title") or item.get("desc")
             or item.get("content") or item.get("question") or item.get("topic")

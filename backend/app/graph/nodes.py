@@ -36,19 +36,6 @@ _UNDERSTAND_SYSTEM = """你是网络检索 Agent 的查询理解模块。给定�
 - 若问题明显是寒暄或无需外部信息（如纯数学计算、常识自我介绍），need_search 设为 false。
 - 只输出 JSON。"""
 
-_PLAN_SYSTEM = """你是检索调度器。根据用户问题，从可用数据源中挑选最合适的若干个（3-8 个），并给出 JSON 数组：
-[
-  {"source": "源名称(必须来自清单)", "query": "发给该源的检索式", "reason": "选择理由(10字内)", "required": false}
-]
-规则：
-- 中文社媒类问题优先 mediacrawler_* 与 bing_cn。
-- 代码/开源实现类问题必须包含 github。
-- 学术/论文类问题包含 nexus 与 arxiv。
-- 需要国外信息时包含 google_web。
-- 不要选状态为「不可用」的源。
-- query 需针对该源优化：GitHub 用英文技术栈关键词，中文社媒用中文口语化关键词。
-- 只输出 JSON 数组。"""
-
 _SYNTH_SYSTEM = """你是严谨的信息整合专家。基于给定的检索证据回答用户问题。
 
 硬性要求：
@@ -57,7 +44,8 @@ _SYNTH_SYSTEM = """你是严谨的信息整合专家。基于给定的检索证�
 3. 若多个来源说法冲突，指出冲突并说明各自出处。
 4. 结构化输出：先给 3 句以内的「核心结论」，再分点展开，最后给「信息缺口 / 可信度说明」。
 5. 用中文回答，语言精炼，不要复述问题。
-6. 在结尾另起一行输出「来源清单」，格式每行：`[编号] 平台名 - 标题 - URL`"""
+6. 证据中若有「高赞评论」，可引用网友观点佐证，引用时必须注明网友昵称（如「网友『xxx』说：…」），不得篡改原意。
+7. 在结尾另起一行输出「来源清单」，格式每行：`[编号] 平台名 - 标题 - URL`"""
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -80,18 +68,6 @@ def _extract_json(text: str) -> object | None:
             except json.JSONDecodeError:
                 continue
     return None
-
-
-def _dedupe_plans(plans: list[SourcePlan]) -> list[SourcePlan]:
-    """同一源合并查询，避免重复调度。"""
-    merged: dict[str, SourcePlan] = {}
-    for p in plans:
-        existing = merged.get(p.source)
-        if existing is None:
-            merged[p.source] = p
-        elif len(p.query) > len(existing.query):
-            merged[p.source] = p
-    return list(merged.values())
 
 
 # ---------------------------------------------------------------- 节点
@@ -155,93 +131,65 @@ async def understand_node(state: AgentState) -> dict:
 
 
 async def plan_node(state: AgentState) -> dict:
-    """路由：决定调度哪些源。"""
+    """路由：全量调度所有可用源（不按意图过滤）。
+
+    用户要求「问了之后所有可用源都采集」，故不再用 LLM 挑源；
+    直接把 available() 且 selectable_by_llm 的源全部纳入计划，
+    每个源按类别分配最合适的子查询。
+    """
     emit = state.get("emit")
     if not state.get("need_search"):
         return {"plan": []}
 
-    available = registry.available()
-    by_name = {a.name: a for a in available}
     user_q = state["normalized_query"]
     sub_queries = state.get("sub_queries") or [user_q]
 
     plans: list[SourcePlan] = []
-    try:
-        prompt = (
-            f"用户问题：{state['task']}\n"
-            f"规范化检索式：{user_q}\n"
-            f"子查询：{json.dumps(sub_queries, ensure_ascii=False)}\n\n"
-            f"可用数据源清单：\n{registry.catalog_for_llm()}"
+    for adapter in registry.available():
+        if not adapter.selectable_by_llm:
+            continue
+        plans.append(
+            SourcePlan(
+                source=adapter.name,
+                kind=adapter.kind,
+                query=_pick_query(adapter.kind, user_q, sub_queries),
+                reason="全量采集",
+            )
         )
-        raw = await complete(_PLAN_SYSTEM, prompt, temperature=0.0)
-        data = _extract_json(raw)
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                src = str(item.get("source", "")).strip()
-                adapter = by_name.get(src)
-                if adapter is None:
-                    continue
-                plans.append(
-                    SourcePlan(
-                        source=src,
-                        kind=adapter.kind,
-                        query=str(item.get("query") or user_q).strip(),
-                        reason=str(item.get("reason", ""))[:30],
-                        required=bool(item.get("required", False)),
-                    )
-                )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("LLM 路由失败，使用启发式兜底：%s", exc)
-
-    if not plans:
-        plans = _heuristic_plan(state["task"], user_q, sub_queries, by_name)
-
-    plans = _dedupe_plans(plans)
 
     if emit:
         await _safe_emit(emit, {
             "type": "tool",
             "name": "调度规划",
             "ok": bool(plans),
-            "result": f"选定 {len(plans)} 个数据源：" + "、".join(p.source for p in plans),
+            "result": f"全量调度 {len(plans)} 个数据源：" + "、".join(p.source for p in plans),
             "arguments": {"plan": [p.model_dump() for p in plans]},
         })
     return {"plan": plans}
 
 
-def _heuristic_plan(
-    task: str, user_q: str, sub_queries: list[str], by_name: dict
-) -> list[SourcePlan]:
-    """LLM 不可用时的确定性回退路由。"""
-    picked: list[SourcePlan] = []
-    lower = (task + " " + user_q).lower()
+def _pick_query(kind: SourceKind, user_q: str, sub_queries: list[str]) -> str:
+    """按源类别挑选最合适的检索式，尽量贴合各源的语言/领域习惯。"""
+    def has_cjk(q: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", q))
 
-    def add(name: str, query: str, reason: str) -> None:
-        adapter = by_name.get(name)
-        if adapter:
-            picked.append(SourcePlan(source=name, kind=adapter.kind, query=query, reason=reason))
+    def has_ascii(q: str) -> bool:
+        return bool(re.search(r"[A-Za-z]", q))
 
-    add("bing_cn", user_q, "国内通用")
-    add("google_web", f"{sub_queries[-1]}", "国外视角")
-
-    code_hints = ("代码", "实现", "github", "开源", "库", "框架", "api", "code", "library")
-    academic_hints = ("论文", "研究", "paper", "学术", "原理", "综述")
-    social_hints = ("评价", "口碑", "网友", "讨论", "体验", "推荐", "怎么样")
-
-    if any(h in lower for h in code_hints):
-        add("github", user_q, "开源代码")
-    if any(h in lower for h in academic_hints):
-        add("nexus", user_q, "文献检索")
-        add("arxiv", user_q, "预印本")
-    if any(h in lower for h in social_hints):
-        for name in ("mediacrawler_zhihu", "mediacrawler_weibo", "mediacrawler_bilibili"):
-            add(name, user_q, "中文社媒")
-
-    if not picked:
-        add("github", user_q, "补充")
-    return picked
+    if kind == SourceKind.CODE:
+        # GitHub 优先纯英文技术栈子查询
+        for q in sub_queries:
+            if has_ascii(q) and not has_cjk(q):
+                return q
+        for q in sub_queries:
+            if has_ascii(q):
+                return q
+    elif kind == SourceKind.SOCIAL_CN:
+        # 社媒优先中文口语子查询
+        for q in sub_queries:
+            if has_cjk(q):
+                return q
+    return user_q
 
 
 async def fan_out_node(state: AgentState) -> dict:
@@ -257,10 +205,13 @@ async def fan_out_node(state: AgentState) -> dict:
         if adapter is None:
             return plan.source, [], f"未注册的源：{plan.source}"
         started = time.perf_counter()
+        # 子进程类源（MediaCrawler）内层超时可达 90s，外层必须 >= 内层，
+        # 否则内层还没跑完就被这里提前杀掉，社媒源永远报「超时」。
+        timeout = adapter.search_timeout or max(settings.source_timeout * 3, 45.0)
         try:
             docs = await asyncio.wait_for(
                 adapter.search(plan.query, settings.max_results_per_source),
-                timeout=max(settings.source_timeout * 3, 45.0),
+                timeout=timeout,
             )
             elapsed = (time.perf_counter() - started) * 1000
             if emit:
@@ -278,7 +229,7 @@ async def fan_out_node(state: AgentState) -> dict:
                 })
             return plan.source, docs, None
         except asyncio.TimeoutError:
-            return plan.source, [], f"超时（>{settings.source_timeout * 3:.0f}s）"
+            return plan.source, [], f"超时（>{timeout:.0f}s）"
         except Exception as exc:  # noqa: BLE001
             return plan.source, [], str(exc)
 
@@ -381,6 +332,13 @@ async def synthesize_node(state: AgentState) -> dict:
             f"    时间={doc.published_at or '未知'} | 作者={doc.author or '未知'}\n"
             f"    内容={body}"
         )
+        # 附带高赞评论区观点，供答案引用网友观点
+        hot = doc.extras.get("hot_comments") or []
+        if hot:
+            comment_text = "；".join(
+                f"网友「{c['author']}」(赞{c['likes']})：{c['content']}" for c in hot
+            )
+            evidence_lines.append(f"    高赞评论：{comment_text}")
     evidence = "\n".join(evidence_lines)
 
     history_text = ""
