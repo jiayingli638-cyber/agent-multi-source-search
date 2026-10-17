@@ -323,25 +323,53 @@ const AnswerBody: React.FC<{ content: string }> = ({ content }) => {
     setTimeout(() => setCopied(false), 1800);
   };
 
-  // 按行渲染，保留标题/列表结构；引用编号 [n] 高亮
-  const renderLine = (line: string, key: number) => {
-    const parts = line.split(/(\[\d+(?:\[\d+\])*\])/g);
-    const isHeading = /^#{1,4}\s/.test(line) || /^\*\*[^*]+\*\*$/.test(line.trim());
-    const isList = /^\s*[-*•]\s/.test(line) || /^\s*\d+\.\s/.test(line);
-
-    const inner = parts.map((part, i) => {
-      if (/^\[\d/.test(part)) {
-        return (
+  // 行内渲染：URL 转可点击链接，引用编号 [n] 高亮
+  const renderInline = (text: string) => {
+    const cleaned = text.replace(/^#{1,4}\s/, '').replace(/\*\*/g, '');
+    const pattern = /(https?:\/\/[^\s"'<>，。；：、）】」』]+)|(\[\d+(?:\[\d+\])*\])/g;
+    const nodes: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let i = 0;
+    while ((match = pattern.exec(cleaned)) !== null) {
+      if (match.index > lastIndex) {
+        nodes.push(cleaned.slice(lastIndex, match.index));
+      }
+      if (match[1]) {
+        const url = match[1];
+        nodes.push(
+          <a
+            key={`u${i++}`}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-cyan-400 underline decoration-cyan-500/40 hover:text-cyan-300 break-all"
+          >
+            {url}
+          </a>
+        );
+      } else if (match[2]) {
+        nodes.push(
           <span
-            key={i}
+            key={`c${i++}`}
             className="inline-flex items-center px-1 mx-0.5 rounded bg-cyan-500/15 text-cyan-300 text-[10.5px] font-mono align-baseline"
           >
-            {part.replace(/[[\]]/g, '')}
+            {match[2].replace(/[[\]]/g, '')}
           </span>
         );
       }
-      return <span key={i}>{part.replace(/^#{1,4}\s/, '').replace(/\*\*/g, '')}</span>;
-    });
+      lastIndex = pattern.lastIndex;
+    }
+    if (lastIndex < cleaned.length) {
+      nodes.push(cleaned.slice(lastIndex));
+    }
+    return nodes;
+  };
+
+  // 按行渲染，保留标题/列表结构
+  const renderLine = (line: string, key: number) => {
+    const isHeading = /^#{1,4}\s/.test(line) || /^\*\*[^*]+\*\*$/.test(line.trim());
+    const isList = /^\s*[-*•]\s/.test(line) || /^\s*\d+\.\s/.test(line);
 
     if (!line.trim()) return <div key={key} className="h-2" />;
 
@@ -356,7 +384,7 @@ const AnswerBody: React.FC<{ content: string }> = ({ content }) => {
             : 'text-[#cbd5e1]'
         }
       >
-        {inner}
+        {renderInline(line)}
       </div>
     );
   };

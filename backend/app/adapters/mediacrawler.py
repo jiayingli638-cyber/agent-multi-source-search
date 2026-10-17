@@ -439,6 +439,18 @@ class MediaCrawlerAdapter(SourceAdapter):
         return out
 
     # ---------- 归一化 ----------
+    def _item_url(self, item: dict, note_id: str) -> str:
+        """优先用 MediaCrawler 已构造好的真实链接，缺失时才按平台模板拼接。
+
+        各平台字段名不同：bili=video_url、wb/tieba=note_url、zhihu=content_url。
+        若直接按模板拼（如 bili 的 video/{id}）会丢掉 av 前缀导致链接打不开。
+        """
+        for key in ("video_url", "note_url", "content_url", "url", "share_url"):
+            v = item.get(key)
+            if v and str(v).startswith("http"):
+                return str(v)
+        return self._build_url(note_id)
+
     def _to_doc(self, item: dict, idx: int) -> Doc:
         """把 MediaCrawler 各平台字段统一映射为 Doc。"""
         note_id = self._note_key(item)
@@ -468,7 +480,7 @@ class MediaCrawlerAdapter(SourceAdapter):
 
         return Doc(
             title=str(title)[:160],
-            url=self._build_url(note_id),
+            url=self._item_url(item, note_id),
             snippet=str(content)[:300],
             content=str(content)[:2000],
             source=self.name,
