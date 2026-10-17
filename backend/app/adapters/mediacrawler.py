@@ -305,6 +305,7 @@ class MediaCrawlerAdapter(SourceAdapter):
             "--keywords", query,          # 统一参数名，多关键词用逗号分隔
             "--save_data_option", "json",
             "--crawler_max_notes_count", str(max(1, limit)),
+            "--max_comments_count_singlenotes", "3",  # 每条只取高赞 top3，避免评论抓取拖垮超时
             "--get_comment", "yes",       # 采集评论区高赞观点，供答案引用
             "--get_sub_comment", "no",    # 子评论耗时且与主评论重复，暂不抓
             "--get_media", "no",

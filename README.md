@@ -266,7 +266,7 @@ MEDIACRAWLER_MODE=local
 MEDIACRAWLER_HOME=D:/MediaCrawler
 MEDIACRAWLER_PYTHON=D:/MediaCrawler/.venv/Scripts/python.exe
 MEDIACRAWLER_PLATFORMS=xhs,dy,ks,bili,wb,tieba,zhihu
-MEDIACRAWLER_TIMEOUT=90
+MEDIACRAWLER_TIMEOUT=200
 ```
 
 **Cookie 配置**（三种方式任选）：
